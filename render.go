@@ -67,7 +67,15 @@ const (
 var bufpool *bpool.BufferPool
 
 // Included helper functions for use when rendering html
-var helperFuncs = htmltemplate.FuncMap{
+var htmlhelperFuncs = htmltemplate.FuncMap{
+	"yield": func() (string, error) {
+		return "", fmt.Errorf("yield called with no layout defined")
+	},
+	"current": func() (string, error) {
+		return "", nil
+	},
+}
+var texthelperFuncs = texttemplate.FuncMap{
 	"yield": func() (string, error) {
 		return "", fmt.Errorf("yield called with no layout defined")
 	},
@@ -83,6 +91,7 @@ type Render interface {
 	JSON(status int, v interface{})
 	// HTML renders a html template specified by the name and writes the result and given status to the http.ResponseWriter.
 	HTML(status int, name string, v interface{}, htmlOpt ...HTMLOptions)
+	TEXT(status int, name string, v interface{}, htmlOpt ...HTMLOptions)
 	// XML writes the given status and XML serialized version of the given value to the http.ResponseWriter.
 	XML(status int, v interface{})
 	// Data writes the raw byte array to the http.ResponseWriter.
@@ -95,6 +104,7 @@ type Render interface {
 	Redirect(location string, status ...int)
 	// Template returns the internal *template.Template used to render the HTML
 	HtmlTemplate() *htmltemplate.Template
+	TextTemplate() *texttemplate.Template
 	// Header exposes the header struct from http.ResponseWriter.
 	Header() http.Header
 }
@@ -149,18 +159,27 @@ type HTMLOptions struct {
 func Renderer(options ...Options) martini.Handler {
 	opt := prepareOptions(options)
 	cs := prepareCharset(opt.Charset)
-	t := compile(opt)
+	ht := htmlcompile(opt)
+	tt := textcompile(opt)
 	bufpool = bpool.NewBufferPool(64)
 	return func(res http.ResponseWriter, req *http.Request, c martini.Context) {
-		var tc *htmltemplate.Template
+		var htc *htmltemplate.Template
 		if martini.Env == martini.Dev {
 			// recompile for easy development
-			tc = compile(opt)
+			htc = htmlcompile(opt)
 		} else {
 			// use a clone of the initial template
-			tc, _ = t.Clone()
+			htc, _ = ht.Clone()
 		}
-		c.MapTo(&renderer{res, req, tc, opt, cs}, (*Render)(nil))
+		var ttc *texttemplate.Template
+		if martini.Env == martini.Dev {
+			// recompile for easy development
+			ttc = textcompile(opt)
+		} else {
+			// use a clone of the initial template
+			ttc, _ = tt.Clone()
+		}
+		c.MapTo(&renderer{res, req, htc, ttc, opt, cs}, (*Render)(nil))
 	}
 }
 
@@ -192,7 +211,7 @@ func prepareOptions(options []Options) Options {
 	return opt
 }
 
-func compile(options Options) *htmltemplate.Template {
+func htmlcompile(options Options) *htmltemplate.Template {
 	dir := options.Directory
 	ht := htmltemplate.New(dir)
 	ht.Delims(options.Delims.Left, options.Delims.Right)
@@ -224,7 +243,7 @@ func compile(options Options) *htmltemplate.Template {
 				}
 
 				// Bomb out if parse fails. We don't want any silent server starts.
-				htmltemplate.Must(tmpl.Funcs(helperFuncs).Parse(string(buf)))
+				htmltemplate.Must(tmpl.Funcs(htmlhelperFuncs).Parse(string(buf)))
 				break
 			}
 		}
@@ -233,6 +252,48 @@ func compile(options Options) *htmltemplate.Template {
 	})
 
 	return ht
+}
+func textcompile(options Options) *texttemplate.Template {
+	dir := options.Directory
+	tt := texttemplate.New(dir)
+	tt.Delims(options.Delims.Left, options.Delims.Right)
+	// parse an initial template in case we don't have any
+	texttemplate.Must(tt.Parse("Martini"))
+
+	filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		r, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+
+		ext := getExt(r)
+
+		for _, extension := range options.Extensions {
+			if ext == extension {
+
+				buf, err := ioutil.ReadFile(path)
+				if err != nil {
+					panic(err)
+				}
+
+				name := (r[0 : len(r)-len(ext)])
+				tmpl := tt.New(filepath.ToSlash(name))
+
+				// add our funcmaps
+				for _, funcs := range options.TextFuncs {
+					tmpl.Funcs(funcs)
+				}
+
+				// Bomb out if parse fails. We don't want any silent server starts.
+				texttemplate.Must(tmpl.Funcs(texthelperFuncs).Parse(string(buf)))
+				break
+			}
+		}
+
+		return nil
+	})
+
+	return tt
 }
 
 func getExt(s string) string {
@@ -246,6 +307,7 @@ type renderer struct {
 	http.ResponseWriter
 	req             *http.Request
 	ht              *htmltemplate.Template
+	tt              *texttemplate.Template
 	opt             Options
 	compiledCharset string
 }
@@ -273,6 +335,27 @@ func (r *renderer) JSON(status int, v interface{}) {
 }
 
 func (r *renderer) HTML(status int, name string, binding interface{}, htmlOpt ...HTMLOptions) {
+	opt := r.prepareHTMLOptions(htmlOpt)
+	// assign a layout if there is one
+	if len(opt.Layout) > 0 {
+		r.addYield(name, binding)
+		name = opt.Layout
+	}
+
+	buf, err := r.execute(name, binding)
+	if err != nil {
+		http.Error(r, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// template rendered fine, write out the result
+	r.Header().Set(ContentType, r.opt.HTMLContentType+r.compiledCharset)
+	r.WriteHeader(status)
+	io.Copy(r, buf)
+	bufpool.Put(buf)
+}
+
+func (r *renderer) TEXT(status int, name string, binding interface{}, htmlOpt ...HTMLOptions) {
 	opt := r.prepareHTMLOptions(htmlOpt)
 	// assign a layout if there is one
 	if len(opt.Layout) > 0 {
@@ -341,8 +424,11 @@ func (r *renderer) Redirect(location string, status ...int) {
 	http.Redirect(r, r.req, location, code)
 }
 
-func (r *renderer) Template() *htmltemplate.Template {
+func (r *renderer) HtmlTemplate() *htmltemplate.Template {
 	return r.ht
+}
+func (r *renderer) TextTemplate() *texttemplate.Template {
+	return r.tt
 }
 
 func (r *renderer) execute(name string, binding interface{}) (*bytes.Buffer, error) {
