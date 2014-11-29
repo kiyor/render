@@ -40,17 +40,16 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
-	"html/template"
-  "io"
+	"github.com/go-martini/martini"
+	"github.com/oxtoacart/bpool"
+	htmltemplate "html/template"
+	"io"
 	"io/ioutil"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/oxtoacart/bpool"
-
-	"github.com/go-martini/martini"
+	texttemplate "text/template"
 )
 
 const (
@@ -68,7 +67,7 @@ const (
 var bufpool *bpool.BufferPool
 
 // Included helper functions for use when rendering html
-var helperFuncs = template.FuncMap{
+var helperFuncs = htmltemplate.FuncMap{
 	"yield": func() (string, error) {
 		return "", fmt.Errorf("yield called with no layout defined")
 	},
@@ -95,7 +94,7 @@ type Render interface {
 	// Redirect is a convienience function that sends an HTTP redirect. If status is omitted, uses 302 (Found)
 	Redirect(location string, status ...int)
 	// Template returns the internal *template.Template used to render the HTML
-	Template() *template.Template
+	HtmlTemplate() *htmltemplate.Template
 	// Header exposes the header struct from http.ResponseWriter.
 	Header() http.Header
 }
@@ -117,7 +116,8 @@ type Options struct {
 	// Extensions to parse template files from. Defaults to [".tmpl"]
 	Extensions []string
 	// Funcs is a slice of FuncMaps to apply to the template upon compilation. This is useful for helper functions. Defaults to [].
-	Funcs []template.FuncMap
+	HtmlFuncs []htmltemplate.FuncMap
+	TextFuncs []texttemplate.FuncMap
 	// Delims sets the action delimiters to the specified strings in the Delims struct.
 	Delims Delims
 	// Appends the given charset to the Content-Type header. Default is "UTF-8".
@@ -152,7 +152,7 @@ func Renderer(options ...Options) martini.Handler {
 	t := compile(opt)
 	bufpool = bpool.NewBufferPool(64)
 	return func(res http.ResponseWriter, req *http.Request, c martini.Context) {
-		var tc *template.Template
+		var tc *htmltemplate.Template
 		if martini.Env == martini.Dev {
 			// recompile for easy development
 			tc = compile(opt)
@@ -192,12 +192,12 @@ func prepareOptions(options []Options) Options {
 	return opt
 }
 
-func compile(options Options) *template.Template {
+func compile(options Options) *htmltemplate.Template {
 	dir := options.Directory
-	t := template.New(dir)
-	t.Delims(options.Delims.Left, options.Delims.Right)
+	ht := htmltemplate.New(dir)
+	ht.Delims(options.Delims.Left, options.Delims.Right)
 	// parse an initial template in case we don't have any
-	template.Must(t.Parse("Martini"))
+	htmltemplate.Must(ht.Parse("Martini"))
 
 	filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		r, err := filepath.Rel(dir, path)
@@ -216,15 +216,15 @@ func compile(options Options) *template.Template {
 				}
 
 				name := (r[0 : len(r)-len(ext)])
-				tmpl := t.New(filepath.ToSlash(name))
+				tmpl := ht.New(filepath.ToSlash(name))
 
 				// add our funcmaps
-				for _, funcs := range options.Funcs {
+				for _, funcs := range options.HtmlFuncs {
 					tmpl.Funcs(funcs)
 				}
 
 				// Bomb out if parse fails. We don't want any silent server starts.
-				template.Must(tmpl.Funcs(helperFuncs).Parse(string(buf)))
+				htmltemplate.Must(tmpl.Funcs(helperFuncs).Parse(string(buf)))
 				break
 			}
 		}
@@ -232,7 +232,7 @@ func compile(options Options) *template.Template {
 		return nil
 	})
 
-	return t
+	return ht
 }
 
 func getExt(s string) string {
@@ -245,7 +245,7 @@ func getExt(s string) string {
 type renderer struct {
 	http.ResponseWriter
 	req             *http.Request
-	t               *template.Template
+	ht              *htmltemplate.Template
 	opt             Options
 	compiledCharset string
 }
@@ -341,27 +341,27 @@ func (r *renderer) Redirect(location string, status ...int) {
 	http.Redirect(r, r.req, location, code)
 }
 
-func (r *renderer) Template() *template.Template {
-	return r.t
+func (r *renderer) Template() *htmltemplate.Template {
+	return r.ht
 }
 
 func (r *renderer) execute(name string, binding interface{}) (*bytes.Buffer, error) {
 	buf := bufpool.Get()
-	return buf, r.t.ExecuteTemplate(buf, name, binding)
+	return buf, r.ht.ExecuteTemplate(buf, name, binding)
 }
 
 func (r *renderer) addYield(name string, binding interface{}) {
-	funcs := template.FuncMap{
-		"yield": func() (template.HTML, error) {
+	funcs := htmltemplate.FuncMap{
+		"yield": func() (htmltemplate.HTML, error) {
 			buf, err := r.execute(name, binding)
 			// return safe html here since we are rendering our own template
-			return template.HTML(buf.String()), err
+			return htmltemplate.HTML(buf.String()), err
 		},
 		"current": func() (string, error) {
 			return name, nil
 		},
 	}
-	r.t.Funcs(funcs)
+	r.ht.Funcs(funcs)
 }
 
 func (r *renderer) prepareHTMLOptions(htmlOpt []HTMLOptions) HTMLOptions {
