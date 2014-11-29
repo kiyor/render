@@ -159,24 +159,17 @@ type HTMLOptions struct {
 func Renderer(options ...Options) martini.Handler {
 	opt := prepareOptions(options)
 	cs := prepareCharset(opt.Charset)
-	ht := htmlcompile(opt)
-	tt := textcompile(opt)
+	ht, tt := compile(opt)
 	bufpool = bpool.NewBufferPool(64)
 	return func(res http.ResponseWriter, req *http.Request, c martini.Context) {
 		var htc *htmltemplate.Template
-		if martini.Env == martini.Dev {
-			// recompile for easy development
-			htc = htmlcompile(opt)
-		} else {
-			// use a clone of the initial template
-			htc, _ = ht.Clone()
-		}
 		var ttc *texttemplate.Template
 		if martini.Env == martini.Dev {
 			// recompile for easy development
-			ttc = textcompile(opt)
+			htc, ttc = compile(opt)
 		} else {
 			// use a clone of the initial template
+			htc, _ = ht.Clone()
 			ttc, _ = tt.Clone()
 		}
 		c.MapTo(&renderer{res, req, htc, ttc, opt, cs}, (*Render)(nil))
@@ -211,50 +204,14 @@ func prepareOptions(options []Options) Options {
 	return opt
 }
 
-func htmlcompile(options Options) *htmltemplate.Template {
+func compile(options Options) (*htmltemplate.Template, *texttemplate.Template) {
 	dir := options.Directory
+
 	ht := htmltemplate.New(dir)
 	ht.Delims(options.Delims.Left, options.Delims.Right)
 	// parse an initial template in case we don't have any
 	htmltemplate.Must(ht.Parse("Martini"))
 
-	filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-		r, err := filepath.Rel(dir, path)
-		if err != nil {
-			return err
-		}
-
-		ext := getExt(r)
-
-		for _, extension := range options.Extensions {
-			if ext == extension {
-
-				buf, err := ioutil.ReadFile(path)
-				if err != nil {
-					panic(err)
-				}
-
-				name := (r[0 : len(r)-len(ext)])
-				tmpl := ht.New(filepath.ToSlash(name))
-
-				// add our funcmaps
-				for _, funcs := range options.HtmlFuncs {
-					tmpl.Funcs(funcs)
-				}
-
-				// Bomb out if parse fails. We don't want any silent server starts.
-				htmltemplate.Must(tmpl.Funcs(htmlhelperFuncs).Parse(string(buf)))
-				break
-			}
-		}
-
-		return nil
-	})
-
-	return ht
-}
-func textcompile(options Options) *texttemplate.Template {
-	dir := options.Directory
 	tt := texttemplate.New(dir)
 	tt.Delims(options.Delims.Left, options.Delims.Right)
 	// parse an initial template in case we don't have any
@@ -277,15 +234,20 @@ func textcompile(options Options) *texttemplate.Template {
 				}
 
 				name := (r[0 : len(r)-len(ext)])
-				tmpl := tt.New(filepath.ToSlash(name))
+				htmpl := ht.New(filepath.ToSlash(name))
+				ttmpl := tt.New(filepath.ToSlash(name))
 
 				// add our funcmaps
+				for _, funcs := range options.HtmlFuncs {
+					htmpl.Funcs(funcs)
+				}
 				for _, funcs := range options.TextFuncs {
-					tmpl.Funcs(funcs)
+					ttmpl.Funcs(funcs)
 				}
 
 				// Bomb out if parse fails. We don't want any silent server starts.
-				texttemplate.Must(tmpl.Funcs(texthelperFuncs).Parse(string(buf)))
+				htmltemplate.Must(htmpl.Funcs(htmlhelperFuncs).Parse(string(buf)))
+				texttemplate.Must(ttmpl.Funcs(texthelperFuncs).Parse(string(buf)))
 				break
 			}
 		}
@@ -293,7 +255,7 @@ func textcompile(options Options) *texttemplate.Template {
 		return nil
 	})
 
-	return tt
+	return ht, tt
 }
 
 func getExt(s string) string {
@@ -338,11 +300,11 @@ func (r *renderer) HTML(status int, name string, binding interface{}, htmlOpt ..
 	opt := r.prepareHTMLOptions(htmlOpt)
 	// assign a layout if there is one
 	if len(opt.Layout) > 0 {
-		r.addYield(name, binding)
+		r.addYieldHtml(name, binding)
 		name = opt.Layout
 	}
 
-	buf, err := r.execute(name, binding)
+	buf, err := r.executeHtml(name, binding)
 	if err != nil {
 		http.Error(r, err.Error(), http.StatusInternalServerError)
 		return
@@ -359,11 +321,11 @@ func (r *renderer) TEXT(status int, name string, binding interface{}, htmlOpt ..
 	opt := r.prepareHTMLOptions(htmlOpt)
 	// assign a layout if there is one
 	if len(opt.Layout) > 0 {
-		r.addYield(name, binding)
+		r.addYieldText(name, binding)
 		name = opt.Layout
 	}
 
-	buf, err := r.execute(name, binding)
+	buf, err := r.executeText(name, binding)
 	if err != nil {
 		http.Error(r, err.Error(), http.StatusInternalServerError)
 		return
@@ -431,15 +393,32 @@ func (r *renderer) TextTemplate() *texttemplate.Template {
 	return r.tt
 }
 
-func (r *renderer) execute(name string, binding interface{}) (*bytes.Buffer, error) {
+func (r *renderer) executeHtml(name string, binding interface{}) (*bytes.Buffer, error) {
 	buf := bufpool.Get()
 	return buf, r.ht.ExecuteTemplate(buf, name, binding)
 }
+func (r *renderer) executeText(name string, binding interface{}) (*bytes.Buffer, error) {
+	buf := bufpool.Get()
+	return buf, r.tt.ExecuteTemplate(buf, name, binding)
+}
 
-func (r *renderer) addYield(name string, binding interface{}) {
+func (r *renderer) addYieldHtml(name string, binding interface{}) {
 	funcs := htmltemplate.FuncMap{
 		"yield": func() (htmltemplate.HTML, error) {
-			buf, err := r.execute(name, binding)
+			buf, err := r.executeHtml(name, binding)
+			// return safe html here since we are rendering our own template
+			return htmltemplate.HTML(buf.String()), err
+		},
+		"current": func() (string, error) {
+			return name, nil
+		},
+	}
+	r.ht.Funcs(funcs)
+}
+func (r *renderer) addYieldText(name string, binding interface{}) {
+	funcs := htmltemplate.FuncMap{
+		"yield": func() (htmltemplate.HTML, error) {
+			buf, err := r.executeText(name, binding)
 			// return safe html here since we are rendering our own template
 			return htmltemplate.HTML(buf.String()), err
 		},

@@ -2,12 +2,13 @@ package render
 
 import (
 	"encoding/xml"
-	"html/template"
+	htmltemplate "html/template"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"reflect"
 	"testing"
+	texttemplate "text/template"
 
 	"github.com/go-martini/martini"
 )
@@ -243,7 +244,14 @@ func Test_Render_Funcs(t *testing.T) {
 	m := martini.Classic()
 	m.Use(Renderer(Options{
 		Directory: "fixtures/custom_funcs",
-		Funcs: []template.FuncMap{
+		HtmlFuncs: []htmltemplate.FuncMap{
+			{
+				"myCustomFunc": func() string {
+					return "My custom function"
+				},
+			},
+		},
+		TextFuncs: []texttemplate.FuncMap{
 			{
 				"myCustomFunc": func() string {
 					return "My custom function"
@@ -393,21 +401,21 @@ func Test_Render_BinaryData_CustomMimeType(t *testing.T) {
 
 func Test_Render_Status204(t *testing.T) {
 	res := httptest.NewRecorder()
-	r := renderer{res, nil, nil, Options{}, ""}
+	r := renderer{res, nil, nil, nil, Options{}, ""}
 	r.Status(204)
 	expect(t, res.Code, 204)
 }
 
 func Test_Render_Error404(t *testing.T) {
 	res := httptest.NewRecorder()
-	r := renderer{res, nil, nil, Options{}, ""}
+	r := renderer{res, nil, nil, nil, Options{}, ""}
 	r.Error(404)
 	expect(t, res.Code, 404)
 }
 
 func Test_Render_Error500(t *testing.T) {
 	res := httptest.NewRecorder()
-	r := renderer{res, nil, nil, Options{}, ""}
+	r := renderer{res, nil, nil, nil, Options{}, ""}
 	r.Error(500)
 	expect(t, res.Code, 500)
 }
@@ -420,7 +428,7 @@ func Test_Render_Redirect_Default(t *testing.T) {
 	}
 	res := httptest.NewRecorder()
 
-	r := renderer{res, &req, nil, Options{}, ""}
+	r := renderer{res, &req, nil, nil, Options{}, ""}
 	r.Redirect("two")
 
 	expect(t, res.Code, 302)
@@ -435,7 +443,7 @@ func Test_Render_Redirect_Code(t *testing.T) {
 	}
 	res := httptest.NewRecorder()
 
-	r := renderer{res, &req, nil, Options{}, ""}
+	r := renderer{res, &req, nil, nil, Options{}, ""}
 	r.Redirect("two", 307)
 
 	expect(t, res.Code, 307)
