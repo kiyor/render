@@ -142,14 +142,14 @@ type Options struct {
 	PrefixXML []byte
 	// Allows changing of output to XHTML instead of HTML. Default is "text/html"
 	HTMLContentType string
-	Extra map[string]string
+	Extra           map[string]string
 }
 
 // HTMLOptions is a struct for overriding some rendering Options for specific HTML call
 type HTMLOptions struct {
 	// Layout template name. Overrides Options.Layout.
 	Layout string
-	Extra map[string]string
+	Extra  map[string]string
 }
 
 // Renderer is a Middleware that maps a render.Render service into the Martini handler chain. An single variadic render.Options
@@ -313,7 +313,7 @@ func (r *renderer) HTML(status int, name string, binding interface{}, htmlOpt ..
 		binding = temp_binding
 	}
 
-  b, err := json.MarshalIndent(binding, "", " ")
+	b, err := json.MarshalIndent(binding, "", " ")
 	if err == nil {
 		fmt.Println(string(b))
 	}
@@ -450,6 +450,6 @@ func (r *renderer) prepareHTMLOptions(htmlOpt []HTMLOptions) HTMLOptions {
 
 	return HTMLOptions{
 		Layout: r.opt.Layout,
-		Extra: r.opt.Extra,
+		Extra:  r.opt.Extra,
 	}
 }
